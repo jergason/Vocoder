@@ -1,10 +1,10 @@
 // Copyright 2011, Google Inc.
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
-// 
+//
 //     * Redistributions of source code must retain the above copyright
 // notice, this list of conditions and the following disclaimer.
 //     * Redistributions in binary form must reproduce the above
@@ -14,7 +14,7 @@
 //     * Neither the name of Google Inc. nor the names of its
 // contributors may be used to endorse or promote products derived from
 // this software without specific prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
 // "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
 // LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
@@ -42,46 +42,46 @@ function dBToLinear(db) {
 function shape(x) {
     var linearThreshold = dBToLinear(threshold);
     var linearHeadroom = dBToLinear(headroom);
-    
+
     var maximum = 1.05 * linearHeadroom * linearThreshold;
     var kk = (maximum - linearThreshold);
-    
+
     var sign = x < 0 ? -1 : +1;
     var absx = Math.abs(x);
-    
+
     var shapedInput = absx < linearThreshold ? absx : linearThreshold + kk * e4(absx - linearThreshold, 1.0 / kk);
     shapedInput *= sign;
-    
+
     return shapedInput;
 }
 
 function generateColortouchCurve(curve) {
     var n = 65536;
     var n2 = n / 2;
-    
+
     for (var i = 0; i < n2; ++i) {
         x = i / n2;
         x = shape(x);
-        
+
         curve[n2 + i] = x;
         curve[n2 - i - 1] = -x;
     }
-    
+
     return curve;
 }
 
 function generateMirrorCurve(curve) {
     var n = 65536;
     var n2 = n / 2;
-    
+
     for (var i = 0; i < n2; ++i) {
         x = i / n2;
         x = shape(x);
-        
+
         curve[n2 + i] = x;
         curve[n2 - i - 1] = x;
     }
-    
+
     return curve;
 }
 
@@ -94,7 +94,7 @@ function WaveShaper(context) {
     waveshaper.connect(postGain);
     this.input = preGain;
     this.output = postGain;
-    
+
     var curve = new Float32Array(65536); // FIXME: share across instances
     generateColortouchCurve(curve);
     waveshaper.curve = curve;

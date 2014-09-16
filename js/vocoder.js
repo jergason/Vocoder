@@ -28,13 +28,17 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-var CANVAS_WIDTH = 582;
-var CANVAS_HEIGHT = 150;
-var GAINS_CANVAS_HEIGHT = 100;
+var audioContext = null;
+var modulatorBuffer = null;
+var carrierBuffer = null;
+var modulatorNode = null;
+var carrierNode = null;
+var vocoding = false;
+
+//constants for carrier buttons
+var FILE = 0, SAWTOOTH=1, WAVETABLE=2, FILENAME=-1;
 
 var FILTER_QUALITY = 6;  // The Q value for the carrier and modulator filters
-
-var animationRunning = false;
 
 // These are "placeholder" gain nodes - because the modulator and carrier will get swapped in
 // as they are loaded, it's easier to connect these nodes to all the bands, and the "real"
@@ -58,7 +62,7 @@ var carrierSampleGainValue = 0.0;
 
 // Carrier Synth oscillator stuff
 var oscillatorNode = null;
-var oscillatorType = 4;		// CUSTOM
+var oscillatorType = 4;   // CUSTOM
 var oscillatorGain = null;
 var oscillatorGainValue = 1.0;
 var oscillatorDetuneValue = 0;
@@ -69,490 +73,500 @@ var WAVETABLEBOOST = 40.0;
 var SAWTOOTHBOOST = 0.40;
 
 // These are the arrays of nodes - the "columns" across the frequency band "rows"
-var modFilterBands = null;		// tuned bandpass filters
-var modFilterPostGains = null;	// post-filter gains.
-var heterodynes = null;		// gain nodes used to multiply bandpass X sine
-var powers = null;			// gain nodes used to multiply prev out by itself
-var lpFilters = null;		// tuned LP filters to remove doubled copy of product
-var lpFilterPostGains = null; 	// gain nodes for tuning input to waveshapers
-var bandAnalysers = null;	// these are just used to drive the visual vocoder band drawing
-var carrierBands = null;	// tuned bandpass filters, same as modFilterBands but in carrier chain
-var carrierFilterPostGains = null;	// post-bandpass gain adjustment
-var carrierBandGains = null;	// these are the "control gains" driven by the lpFilters
+var modFilterBands = null;    // tuned bandpass filters
+var modFilterPostGains = null;  // post-filter gains.
+var heterodynes = null;   // gain nodes used to multiply bandpass X sine
+var powers = null;      // gain nodes used to multiply prev out by itself
+var lpFilters = null;   // tuned LP filters to remove doubled copy of product
+var lpFilterPostGains = null;   // gain nodes for tuning input to waveshapers
+var bandAnalysers = null; // these are just used to drive the visual vocoder band drawing
+var carrierBands = null;  // tuned bandpass filters, same as modFilterBands but in carrier chain
+var carrierFilterPostGains = null;  // post-bandpass gain adjustment
+var carrierBandGains = null;  // these are the "control gains" driven by the lpFilters
 
-var modulatorCanvas = null;
-var carrierCanvas = null;
-var outputCanvas = null;
-var DEBUG_BAND = 5;		// current debug band - used to display a filtered signal
+var DEBUG_BAND = 5;   // current debug band - used to display a filtered signal
 
 var vocoderBands;
 var numVocoderBands;
 
 var hpFilterGain = null;
 
+function shutOffCarrier() {
+  oscillatorNode.stop(0);
+  oscillatorNode = null;
+  noiseNode.stop(0);
+  noiseNode = null;
+  carrierSampleNode.stop(0);
+  carrierSampleNode = null;
+}
+
+function loadModulator( buffer ) {
+  modulatorBuffer = buffer;
+}
+
+function loadCarrier( buffer ) {
+  carrierBuffer = buffer;
+  if (vocoding) {
+    newCarrierNode = audioContext.createBufferSource();
+    newCarrierNode.buffer = carrierBuffer;
+    newCarrierNode.loop = true;
+    newCarrierNode.connect(carrierInput);
+    carrierNode.disconnect();
+    newCarrierNode.start(0);
+    carrierNode.stop(0);
+    carrierNode = newCarrierNode;
+  }
+}
+
+function selectSawtooth() {
+  if ( wavetableSignalGain )
+    wavetableSignalGain.gain.value = SAWTOOTHBOOST;
+  if (oscillatorNode)
+    oscillatorNode.type = "sawtooth";
+}
+
+function selectWavetable() {
+  if ( wavetableSignalGain )
+    wavetableSignalGain.gain.value = WAVETABLEBOOST;
+  if (oscillatorNode)
+    oscillatorNode.setPeriodicWave ?
+    oscillatorNode.setPeriodicWave(wavetable) :
+  oscillatorNode.setWaveTable(wavetable);
+  wavetableSignalGain.gain.value = WAVETABLEBOOST;
+}
+
+function onUpdateModGain(event, ui) {
+  modulatorGainValue = ui.value;
+  if (modulatorGain)
+    modulatorGain.gain.value = ui.value;
+}
+
+// sample-based carrier
+function onUpdateSampleLevel(event, ui) {
+  carrierSampleGainValue = ui.value;
+  if (carrierSampleGain)
+    carrierSampleGain.gain.value = ui.value;
+}
+
+// noise in carrier
+function onUpdateSynthLevel(event, ui) {
+  oscillatorGainValue = ui.value;
+  if (oscillatorGain)
+    oscillatorGain.gain.value = ui.value;
+}
+
+// noise in carrier
+function onUpdateNoiseLevel(event, ui) {
+  noiseGainValue = ui.value;
+  if (noiseGain)
+    noiseGain.gain.value = ui.value;
+}
+
+// detuning for wavetable and sawtooth oscillators
+function onUpdateDetuneLevel(event, ui) {
+  oscillatorDetuneValue = ui.value;
+  if (oscillatorNode)
+    oscillatorNode.detune.value = ui.value;
+}
+
+// Initialization function for the page.
+function init(audioContext, oscillatorNode, carrierNode) {
+
+  try {
+    audioContext = audioContext;
+  }
+  catch(e) {
+    alert('The Web Audio API is apparently not supported in this browser.');
+  }
+
+
+  generateVocoderBands( 55, 7040, 28 );
+  // Set up the vocoder chains
+  setupVocoderGraph();
+
+  //vocode();
+}
+
+module.exports = init;
+
 // this function will algorithmically re-calculate vocoder bands, distributing evenly
 // from startFreq to endFreq, splitting evenly (logarhythmically) into a given numBands.
 // The function places this info into the global vocoderBands and numVocoderBands variables.
-function generateVocoderBands( startFreq, endFreq, numBands ) {
-	// Remember: 1200 cents in octave, 100 cents per semitone
+function generateVocoderBands(startFreq, endFreq, numBands) {
+  // Remember: 1200 cents in octave, 100 cents per semitone
 
-	var totalRangeInCents = 1200 * Math.log( endFreq / startFreq ) / Math.LN2;
-	var centsPerBand = totalRangeInCents / numBands;
-	var scale = Math.pow( 2, centsPerBand / 1200 );  // This is the scaling for successive bands
+  var totalRangeInCents = 1200 * Math.log( endFreq / startFreq ) / Math.LN2;
+  var centsPerBand = totalRangeInCents / numBands;
+  var scale = Math.pow( 2, centsPerBand / 1200 );  // This is the scaling for successive bands
 
-	vocoderBands = new Array();
-	var currentFreq = startFreq;
+  vocoderBands = [];
+  var currentFreq = startFreq;
 
-	for (var i=0; i<numBands; i++) {
-		vocoderBands[i] = new Object();
-		vocoderBands[i].frequency = currentFreq;
-//		console.log( "Band " + i + " centered at " + currentFreq + "Hz" );
-		currentFreq = currentFreq * scale;
-	}
+  for (var i=0; i<numBands; i++) {
+    vocoderBands[i] = new Object();
+    vocoderBands[i].frequency = currentFreq;
+    //console.log( "Band " + i + " centered at " + currentFreq + "Hz" );
+    currentFreq = currentFreq * scale;
+  }
 
-	numVocoderBands = numBands;
+  numVocoderBands = numBands;
 }
 
-function loadNoiseBuffer() {	// create a 5-second buffer of noise
+function loadNoiseBuffer() {  // create a 5-second buffer of noise
     var lengthInSamples =  5 * audioContext.sampleRate;
     noiseBuffer = audioContext.createBuffer(1, lengthInSamples, audioContext.sampleRate);
     var bufferData = noiseBuffer.getChannelData(0);
-    
+
     for (var i = 0; i < lengthInSamples; ++i) {
-        bufferData[i] = (2*Math.random() - 1);	// -1 to +1
+      bufferData[i] = (2*Math.random() - 1);  // -1 to +1
     }
 }
 
 function initBandpassFilters() {
-	// When this function is called, the carrierNode and modulatorAnalyser 
-	// may not already be created.  Create placeholder nodes for them.
-	modulatorInput = audioContext.createGain();
-	carrierInput = audioContext.createGain();
+  // When this function is called, the carrierNode and modulatorAnalyser
+  // may not already be created.  Create placeholder nodes for them.
+  modulatorInput = audioContext.createGain();
+  carrierInput = audioContext.createGain();
 
-	if (modFilterBands == null)
-		modFilterBands = new Array();
+  if (modFilterBands == null)
+    modFilterBands = [];
 
-	if (modFilterPostGains == null)
-		modFilterPostGains = new Array();
+  if (modFilterPostGains == null)
+    modFilterPostGains = [];
 
-	if (heterodynes == null)
-		heterodynes = new Array();
-	
-	if (powers == null)
-		powers = new Array();
+  if (heterodynes == null)
+    heterodynes = [];
 
-	if (lpFilters == null)
-		lpFilters = new Array();
+  if (powers == null)
+    powers = [];
 
-	if (lpFilterPostGains == null)
-		lpFilterPostGains = new Array();
+  if (lpFilters == null)
+    lpFilters = [];
 
-	if (bandAnalysers == null)
-		bandAnalysers = new Array();
+  if (lpFilterPostGains == null)
+    lpFilterPostGains = [];
 
-	
-	if (carrierBands == null)
-		carrierBands = new Array();
+  if (bandAnalysers == null)
+    bandAnalysers = [];
 
-	if (carrierFilterPostGains == null)
-		carrierFilterPostGains = new Array();
 
-	if (carrierBandGains == null)
-		carrierBandGains = new Array();
+  if (carrierBands == null)
+    carrierBands = [];
+
+  if (carrierFilterPostGains == null)
+    carrierFilterPostGains = [];
+
+  if (carrierBandGains == null)
+    carrierBandGains = [];
 
     var waveShaperCurve = new Float32Array(65536);
-	// Populate with a "curve" that does an abs()
+    // Populate with a "curve" that does an abs()
     var n = 65536;
     var n2 = n / 2;
-    
+
     for (var i = 0; i < n2; ++i) {
-        x = i / n2;
-        
-        waveShaperCurve[n2 + i] = x;
-        waveShaperCurve[n2 - i - 1] = x;
+      x = i / n2;
+
+      waveShaperCurve[n2 + i] = x;
+      waveShaperCurve[n2 - i - 1] = x;
     }
-	
-	// Set up a high-pass filter to add back in the fricatives, etc.
-	// (this isn't used by default in the "production" version, as I hid the slider)
-	var hpFilter = audioContext.createBiquadFilter();
-	hpFilter.type = "highpass";
-	hpFilter.frequency.value = 8000; // or use vocoderBands[numVocoderBands-1].frequency;
-	hpFilter.Q.value = 1; // 	no peaking
-	modulatorInput.connect( hpFilter);
 
-	hpFilterGain = audioContext.createGain();
-	hpFilterGain.gain.value = 0.0;
+  // Set up a high-pass filter to add back in the fricatives, etc.
+  // (this isn't used by default in the "production" version, as I hid the slider)
+  var hpFilter = audioContext.createBiquadFilter();
+  hpFilter.type = "highpass";
+  hpFilter.frequency.value = 8000; // or use vocoderBands[numVocoderBands-1].frequency;
+  hpFilter.Q.value = 1; //  no peaking
+  modulatorInput.connect( hpFilter);
 
-	hpFilter.connect( hpFilterGain );
-	hpFilterGain.connect( audioContext.destination );
+  hpFilterGain = audioContext.createGain();
+  hpFilterGain.gain.value = 0.0;
 
-	//clear the arrays
-	modFilterBands.length = 0;
-	modFilterPostGains.length = 0;
-	heterodynes.length = 0;
-	powers.length = 0;
-	lpFilters.length = 0;
-	lpFilterPostGains.length = 0;
-	carrierBands.length = 0;
-	carrierFilterPostGains.length = 0;
-	carrierBandGains.length = 0;
-	bandAnalysers.length = 0;
+  hpFilter.connect( hpFilterGain );
+  hpFilterGain.connect( audioContext.destination );
 
-	var outputGain = audioContext.createGain();
-	outputGain.connect(audioContext.destination);
+  //clear the arrays
+  modFilterBands.length = 0;
+  modFilterPostGains.length = 0;
+  heterodynes.length = 0;
+  powers.length = 0;
+  lpFilters.length = 0;
+  lpFilterPostGains.length = 0;
+  carrierBands.length = 0;
+  carrierFilterPostGains.length = 0;
+  carrierBandGains.length = 0;
+  bandAnalysers.length = 0;
 
-	var rectifierCurve = new Float32Array(65536);
-	for (var i=-32768; i<32768; i++)
-		rectifierCurve[i+32768] = ((i>0)?i:-i)/32768;
+  var outputGain = audioContext.createGain();
+  outputGain.connect(audioContext.destination);
 
-	for (var i=0; i<numVocoderBands; i++) {
-		// CREATE THE MODULATOR CHAIN
-		// create the bandpass filter in the modulator chain
-		var modulatorFilter = audioContext.createBiquadFilter();
-		modulatorFilter.type = "bandpass";	// Bandpass filter
-		modulatorFilter.frequency.value = vocoderBands[i].frequency;
-		modulatorFilter.Q.value = FILTER_QUALITY; // 	initial quality
-		modulatorInput.connect( modulatorFilter );
-		modFilterBands.push( modulatorFilter );
+  var rectifierCurve = new Float32Array(65536);
+  for (var i=-32768; i<32768; i++)
+    rectifierCurve[i+32768] = ((i>0)?i:-i)/32768;
 
-		// Now, create a second bandpass filter tuned to the same frequency - 
-		// this turns our second-order filter into a 4th-order filter,
-		// which has a steeper rolloff/octave
-		var secondModulatorFilter = audioContext.createBiquadFilter();
-		secondModulatorFilter.type = "bandpass";	// Bandpass filter
-		secondModulatorFilter.frequency.value = vocoderBands[i].frequency;
-		secondModulatorFilter.Q.value = FILTER_QUALITY; // 	initial quality
-		modulatorFilter.chainedFilter = secondModulatorFilter;
-		modulatorFilter.connect( secondModulatorFilter );
+  for (var i=0; i<numVocoderBands; i++) {
+    // CREATE THE MODULATOR CHAIN
+    // create the bandpass filter in the modulator chain
+    var modulatorFilter = audioContext.createBiquadFilter();
+    modulatorFilter.type = "bandpass";  // Bandpass filter
+    modulatorFilter.frequency.value = vocoderBands[i].frequency;
+    modulatorFilter.Q.value = FILTER_QUALITY; //  initial quality
+    modulatorInput.connect( modulatorFilter );
+    modFilterBands.push( modulatorFilter );
 
-		// create a post-filtering gain to bump the levels up.
-		var modulatorFilterPostGain = audioContext.createGain();
-		modulatorFilterPostGain.gain.value = 6;
-		secondModulatorFilter.connect( modulatorFilterPostGain );
-		modFilterPostGains.push( modulatorFilterPostGain );
+    // Now, create a second bandpass filter tuned to the same frequency -
+    // this turns our second-order filter into a 4th-order filter,
+    // which has a steeper rolloff/octave
+    var secondModulatorFilter = audioContext.createBiquadFilter();
+    secondModulatorFilter.type = "bandpass";  // Bandpass filter
+    secondModulatorFilter.frequency.value = vocoderBands[i].frequency;
+    secondModulatorFilter.Q.value = FILTER_QUALITY; //  initial quality
+    modulatorFilter.chainedFilter = secondModulatorFilter;
+    modulatorFilter.connect( secondModulatorFilter );
 
-		// Create the sine oscillator for the heterodyne
-		var heterodyneOscillator = audioContext.createOscillator();
-		heterodyneOscillator.frequency.value = vocoderBands[i].frequency;
+    // create a post-filtering gain to bump the levels up.
+    var modulatorFilterPostGain = audioContext.createGain();
+    modulatorFilterPostGain.gain.value = 6;
+    secondModulatorFilter.connect( modulatorFilterPostGain );
+    modFilterPostGains.push( modulatorFilterPostGain );
 
-		heterodyneOscillator.start(0);
+    // Create the sine oscillator for the heterodyne
+    var heterodyneOscillator = audioContext.createOscillator();
+    heterodyneOscillator.frequency.value = vocoderBands[i].frequency;
 
-		// Create the node to multiply the sine by the modulator
-		var heterodyne = audioContext.createGain();
-		modulatorFilterPostGain.connect( heterodyne );
-		heterodyne.gain.value = 0.0;	// audio-rate inputs are summed with initial intrinsic value
-		heterodyneOscillator.connect( heterodyne.gain );
+    heterodyneOscillator.start(0);
 
-		var heterodynePostGain = audioContext.createGain();
-		heterodynePostGain.gain.value = 2.0;		// GUESS:  boost
-		heterodyne.connect( heterodynePostGain );
-		heterodynes.push( heterodynePostGain );
+    // Create the node to multiply the sine by the modulator
+    var heterodyne = audioContext.createGain();
+    modulatorFilterPostGain.connect( heterodyne );
+    heterodyne.gain.value = 0.0;  // audio-rate inputs are summed with initial intrinsic value
+    heterodyneOscillator.connect( heterodyne.gain );
+
+    var heterodynePostGain = audioContext.createGain();
+    heterodynePostGain.gain.value = 2.0;    // GUESS:  boost
+    heterodyne.connect( heterodynePostGain );
+    heterodynes.push( heterodynePostGain );
 
 
-		// Create the rectifier node
-		var rectifier = audioContext.createWaveShaper();
-		rectifier.curve = rectifierCurve;
-		heterodynePostGain.connect( rectifier );
+    // Create the rectifier node
+    var rectifier = audioContext.createWaveShaper();
+    rectifier.curve = rectifierCurve;
+    heterodynePostGain.connect( rectifier );
 
-		// Create the lowpass filter to mask off the difference (near zero)
-		var lpFilter = audioContext.createBiquadFilter();
-		lpFilter.type = "lowpass";	// Lowpass filter
-		lpFilter.frequency.value = 5.0;	// Guesstimate!  Mask off 20Hz and above.
-		lpFilter.Q.value = 1;	// don't need a peak
-		lpFilters.push( lpFilter );
-		rectifier.connect( lpFilter );
+    // Create the lowpass filter to mask off the difference (near zero)
+    var lpFilter = audioContext.createBiquadFilter();
+    lpFilter.type = "lowpass";  // Lowpass filter
+    lpFilter.frequency.value = 5.0; // Guesstimate!  Mask off 20Hz and above.
+    lpFilter.Q.value = 1; // don't need a peak
+    lpFilters.push( lpFilter );
+    rectifier.connect( lpFilter );
 
-		var lpFilterPostGain = audioContext.createGain();
-		lpFilterPostGain.gain.value = 1.0; 
-		lpFilter.connect( lpFilterPostGain );
-		lpFilterPostGains.push( lpFilterPostGain );
+    var lpFilterPostGain = audioContext.createGain();
+    lpFilterPostGain.gain.value = 1.0;
+    lpFilter.connect( lpFilterPostGain );
+    lpFilterPostGains.push( lpFilterPostGain );
 
-   		var waveshaper = audioContext.createWaveShaper();
-		waveshaper.curve = waveShaperCurve;
-		lpFilterPostGain.connect( waveshaper );
+      var waveshaper = audioContext.createWaveShaper();
+    waveshaper.curve = waveShaperCurve;
+    lpFilterPostGain.connect( waveshaper );
 
-		// create an analyser to drive the vocoder band drawing
-		var analyser = audioContext.createAnalyser();
-		analyser.fftSize = 128;	//small, shouldn't matter
-		waveshaper.connect(analyser);
-		bandAnalysers.push( analyser );
+    // create an analyser to drive the vocoder band drawing
+    var analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128; //small, shouldn't matter
+    waveshaper.connect(analyser);
+    bandAnalysers.push( analyser );
 
-		// Create the bandpass filter in the carrier chain
-		var carrierFilter = audioContext.createBiquadFilter();
-		carrierFilter.type = "bandpass";
-		carrierFilter.frequency.value = vocoderBands[i].frequency;
-		carrierFilter.Q.value = FILTER_QUALITY;
-		carrierBands.push( carrierFilter );
-		carrierInput.connect( carrierFilter );
+    // Create the bandpass filter in the carrier chain
+    var carrierFilter = audioContext.createBiquadFilter();
+    carrierFilter.type = "bandpass";
+    carrierFilter.frequency.value = vocoderBands[i].frequency;
+    carrierFilter.Q.value = FILTER_QUALITY;
+    carrierBands.push( carrierFilter );
+    carrierInput.connect(carrierFilter);
 
-		// We want our carrier filters to be 4th-order filter too.
-		var secondCarrierFilter = audioContext.createBiquadFilter();
-		secondCarrierFilter.type = "bandpass";	// Bandpass filter
-		secondCarrierFilter.frequency.value = vocoderBands[i].frequency;
-		secondCarrierFilter.Q.value = FILTER_QUALITY; // 	initial quality
-		carrierFilter.chainedFilter = secondCarrierFilter;
-		carrierFilter.connect( secondCarrierFilter );
+    // We want our carrier filters to be 4th-order filter too.
+    var secondCarrierFilter = audioContext.createBiquadFilter();
+    secondCarrierFilter.type = "bandpass";  // Bandpass filter
+    secondCarrierFilter.frequency.value = vocoderBands[i].frequency;
+    secondCarrierFilter.Q.value = FILTER_QUALITY; //  initial quality
+    carrierFilter.chainedFilter = secondCarrierFilter;
+    carrierFilter.connect( secondCarrierFilter );
 
-		var carrierFilterPostGain = audioContext.createGain();
-		carrierFilterPostGain.gain.value = 10.0;
-		secondCarrierFilter.connect( carrierFilterPostGain );
-		carrierFilterPostGains.push( carrierFilterPostGain );
+    var carrierFilterPostGain = audioContext.createGain();
+    carrierFilterPostGain.gain.value = 10.0;
+    secondCarrierFilter.connect( carrierFilterPostGain );
+    carrierFilterPostGains.push( carrierFilterPostGain );
 
-		// Create the carrier band gain node
-		var bandGain = audioContext.createGain();
-		carrierBandGains.push( bandGain );
-		carrierFilterPostGain.connect( bandGain );
-		bandGain.gain.value = 0.0;	// audio-rate inputs are summed with initial intrinsic value
-		waveshaper.connect( bandGain.gain );	// connect the lp controller
+    // Create the carrier band gain node
+    var bandGain = audioContext.createGain();
+    carrierBandGains.push( bandGain );
+    carrierFilterPostGain.connect( bandGain );
+    bandGain.gain.value = 0.0;  // audio-rate inputs are summed with initial intrinsic value
+    waveshaper.connect( bandGain.gain );  // connect the lp controller
 
-		bandGain.connect( outputGain );
-	}
+    bandGain.connect( outputGain );
+  }
 
-	addSingleValueSlider( "hi-pass gain", hpFilterGain.gain.value, 0.0, 1.0, hpFilterGain, updateSingleGain );
-	addSingleValueSlider( "hi-pass freq", hpFilter.frequency.value, 4000, 10000.0, hpFilter, updateSingleFrequency );
-	addSingleValueSlider( "hi-pass Q", hpFilter.Q.value, 1, 50.0, hpFilter, updateSingleQ );
 
-	addColumnSlider( "mod filter Q", modFilterBands[0].Q.value, 1.0, 20.0, modFilterBands, updateQs );
-	addColumnSlider( "mod filter post gain", modFilterPostGains[0].gain.value, 1.0, 20.0, modFilterPostGains, updateGains );
-	addColumnSlider( "heterodyne post gain", heterodynes[0].gain.value, 1.0, 8.0, heterodynes, updateGains );
-	addColumnSlider( "lp filter Q", lpFilters[0].Q.value, 1.0, 100.0, lpFilters, updateQs );
-	addColumnSlider( "lp filter frequency", lpFilters[0].frequency.value, 1.0, 100.0, lpFilters, updateFrequencies );
-	addColumnSlider( "lp filter post gain", lpFilterPostGains[0].gain.value, 1.0, 10.0, lpFilterPostGains, updateGains );
+  // Now set up our wavetable stuff.
+  var real = new Float32Array(FOURIER_SIZE);
+  var imag = new Float32Array(FOURIER_SIZE);
+  real[0] = 0.0;
+  imag[0] = 0.0;
+  for (var i=1; i<FOURIER_SIZE; i++) {
+    real[i]=1.0;
+    imag[i]=1.0;
+  }
 
-	addSingleValueSlider( "carrier input gain", carrierInput.gain.value, 0.0, 10.0, carrierInput, updateSingleGain );
-	addColumnSlider( "carrier filter Q", carrierBands[0].Q.value, 1.0, 20.0, carrierBands, updateQs );
-	addColumnSlider( "carrier filter post gain", carrierFilterPostGains[0].gain.value, 1.0, 20.0, carrierFilterPostGains, updateGains );
-	addSingleValueSlider( "output gain", outputGain.gain.value, 0.0, 10.0, outputGain, updateSingleGain );
-
-	modulatorInput.connect( analyser1 );
-	outputGain.connect( analyser2 );
-
-	// Now set up our wavetable stuff.
-	var real = new Float32Array(FOURIER_SIZE);
-	var imag = new Float32Array(FOURIER_SIZE);
-	real[0] = 0.0;
-	imag[0] = 0.0;
-	for (var i=1; i<FOURIER_SIZE; i++) {
-		real[i]=1.0;
-		imag[i]=1.0;
-	}
-
-	wavetable = (audioContext.createPeriodicWave) ?
-		audioContext.createPeriodicWave(real, imag) :
-		audioContext.createWaveTable(real, imag);
-	loadNoiseBuffer();
+  wavetable = (audioContext.createPeriodicWave) ?
+    audioContext.createPeriodicWave(real, imag) :
+    audioContext.createWaveTable(real, imag);
+  loadNoiseBuffer();
 
 }
 
 function setupVocoderGraph() {
-	initBandpassFilters();
+  initBandpassFilters();
 }
 
-function drawVocoderGains() {
-	vocoderCanvas.clearRect(0, 0, CANVAS_WIDTH, GAINS_CANVAS_HEIGHT);
-  	vocoderCanvas.fillStyle = '#F6D565';
-  	vocoderCanvas.lineCap = 'round';
-	var binWidth = (CANVAS_WIDTH / numVocoderBands);
-	var value;
+function createCarriersAndPlay(output) {
+  carrierSampleNode = audioContext.createBufferSource();
+  carrierSampleNode.buffer = carrierBuffer;
+  carrierSampleNode.loop = true;
 
-	var sample = new Uint8Array(1); // should only need one sample
+  carrierSampleGain = audioContext.createGain();
+  carrierSampleGain.gain.value = carrierSampleGainValue;
+  carrierSampleNode.connect(carrierSampleGain);
+  carrierSampleGain.connect(output);
 
-	// Draw rectangle for each vocoder bin.
-	for (var i = 0; i < numVocoderBands; i++) {
-    	vocoderCanvas.fillStyle = "hsl( " + Math.round((i*360)/numVocoderBands) + ", 100%, 50%)";
-    	bandAnalysers[i].getByteTimeDomainData(sample);
-    	value = ((1.0 * sample[0]) - 128.0) / 64;
-    	vocoderCanvas.fillRect(i * binWidth, GAINS_CANVAS_HEIGHT, binWidth, -value * GAINS_CANVAS_HEIGHT );
-	}
-}
+  // The wavetable signal needs a boost.
+  wavetableSignalGain = audioContext.createGain();
 
-function drawFreqAnalysis( analyser, canvas ) {
-	canvas.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-	var numBins = analyser.frequencyBinCount;
-	numBins = numBins /4;  // this is JUST to drop the top half of the frequencies - they're not interesting.
-	var binWidth = (CANVAS_WIDTH / numBins);
-	var bins = new Uint8Array(numBins);
-	var SCALAR = CANVAS_HEIGHT/256;
-	analyser.getByteFrequencyData(bins);
+  oscillatorNode = audioContext.createOscillator();
+  if (oscillatorType == 4) { // wavetable
+    oscillatorNode.setPeriodicWave ?
+    oscillatorNode.setPeriodicWave(wavetable) :
+    oscillatorNode.setWaveTable(wavetable);
+    wavetableSignalGain.gain.value = WAVETABLEBOOST;
+  } else {
+    oscillatorNode.type = oscillatorType;
+    wavetableSignalGain.gain.value = SAWTOOTHBOOST;
+  }
+  oscillatorNode.frequency.value = 110;
+  oscillatorNode.detune.value = oscillatorDetuneValue;
+  oscillatorNode.connect(wavetableSignalGain);
 
-	// Draw rectangle for each vocoder bin.
-	for (var i = 0; i < numBins; i++) {
-    	canvas.fillStyle = "hsl( " + Math.round((i*360)/numBins) + ", 100%, 50%)";
-    	canvas.fillRect(i * binWidth, CANVAS_HEIGHT, binWidth, -bins[i]*SCALAR );
-	}
-}
+  oscillatorGain = audioContext.createGain();
+  oscillatorGain.gain.value = oscillatorGainValue;
 
-var rafID = null;
+  wavetableSignalGain.connect(oscillatorGain);
+  oscillatorGain.connect(output);
 
-function cancelVocoderUpdates() {
-	window.cancelAnimationFrame( rafID );
-	rafID = null;
-}
+  noiseNode = audioContext.createBufferSource();
+  noiseNode.buffer = noiseBuffer;
+  noiseNode.loop = true;
+  noiseGain = audioContext.createGain();
+  noiseGain.gain.value = noiseGainValue;
+  noiseNode.connect(noiseGain);
 
-function updateAnalysers(time) {
-	if (cheapAnalysis) {
-		drawFreqAnalysis( analyser1, analyserView1 );
-		drawFreqAnalysis( analyser2, analyserView2 );
-	} else {
-		analyserView1.doFrequencyAnalysis( analyser1 );
-		analyserView2.doFrequencyAnalysis( analyser2 );
-	}
-	drawVocoderGains();
-	
-  	rafID = window.requestAnimationFrame( updateAnalysers );
-}
-
-function createCarriersAndPlay( output ) {
-	carrierSampleNode = audioContext.createBufferSource();
-	carrierSampleNode.buffer = carrierBuffer;
-	carrierSampleNode.loop = true;
-
-	carrierSampleGain = audioContext.createGain();
-	carrierSampleGain.gain.value = carrierSampleGainValue;
-	carrierSampleNode.connect( carrierSampleGain );
-	carrierSampleGain.connect( output );
-
-	// The wavetable signal needs a boost.
-	wavetableSignalGain = audioContext.createGain();
-
-	oscillatorNode = audioContext.createOscillator();
-	if (oscillatorType = 4)	{ // wavetable
-		oscillatorNode.setPeriodicWave ? 
-		oscillatorNode.setPeriodicWave(wavetable) :
-		oscillatorNode.setWaveTable(wavetable);
-		wavetableSignalGain.gain.value = WAVETABLEBOOST;
-	} else {
-		oscillatorNode.type = oscillatorType;
-		wavetableSignalGain.gain.value = SAWTOOTHBOOST;
-	}
-	oscillatorNode.frequency.value = 110;
-	oscillatorNode.detune.value = oscillatorDetuneValue;
-	oscillatorNode.connect(wavetableSignalGain);
-
-	oscillatorGain = audioContext.createGain();
-	oscillatorGain.gain.value = oscillatorGainValue;
-
-	wavetableSignalGain.connect(oscillatorGain);
-	oscillatorGain.connect(output);
-	
-	noiseNode = audioContext.createBufferSource();
-	noiseNode.buffer = noiseBuffer;
-	noiseNode.loop = true;
-	noiseGain = audioContext.createGain();
-	noiseGain.gain.value = noiseGainValue;
-	noiseNode.connect(noiseGain);
-
-	noiseGain.connect(output);
-	oscillatorNode.start(0);
-	noiseNode.start(0);
-	carrierSampleNode.start(0);
+  noiseGain.connect(output);
+  oscillatorNode.start(0);
+  noiseNode.start(0);
+  carrierSampleNode.start(0);
 
 }
 
 function vocode() {
-	if (this.event) 
-		this.event.preventDefault();
+  if (vocoding) {
+    if (modulatorNode) {
+      modulatorNode.stop(0);
+    }
+    shutOffCarrier();
+    vocoding = false;
+    return;
+  }
 
-	if (vocoding) {
-		if (modulatorNode)
-			modulatorNode.stop(0);
-		shutOffCarrier();
-		vocoding = false;
-		liveInput = false;
-		cancelVocoderUpdates();
-		if (endOfModulatorTimer)
-			window.clearTimeout(endOfModulatorTimer);
-		endOfModulatorTimer = 0;
-		return;
-	} else if (document.getElementById("carrierpreview").classList.contains("playing") )
-		finishPreviewingCarrier();
-	else if (document.getElementById("modulatorpreview").classList.contains("playing") )
-		finishPreviewingModulator();
+  createCarriersAndPlay(carrierInput);
 
-	createCarriersAndPlay( carrierInput );
+  vocoding = true;
 
-	vocoding = true;
-
-	modulatorNode = audioContext.createBufferSource();
-	modulatorNode.buffer = modulatorBuffer;
-	modulatorGain = audioContext.createGain();
-	modulatorGain.gain.value = modulatorGainValue;
-	modulatorNode.connect( modulatorGain );
-	modulatorGain.connect( modulatorInput );
-	modulatorNode.start(0);
-
- 	window.requestAnimationFrame( updateAnalysers );
-	endOfModulatorTimer = window.setTimeout( vocode, modulatorNode.buffer.duration * 1000 + 20 );
+  modulatorNode = audioContext.createBufferSource();
+  modulatorNode.buffer = modulatorBuffer;
+  modulatorGain = audioContext.createGain();
+  modulatorGain.gain.value = modulatorGainValue;
+  modulatorNode.connect(modulatorGain);
+  modulatorGain.connect(modulatorInput);
+  modulatorNode.start(0);
 }
 
 function error() {
-    alert('Stream generation failed.');
+  alert('Stream generation failed.');
 }
 
 function getUserMedia(dictionary, callback) {
     try {
-        if (!navigator.getUserMedia)
-        	navigator.getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
-        navigator.getUserMedia(dictionary, callback, error);
+      if (!navigator.getUserMedia)
+        navigator.getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+      navigator.getUserMedia(dictionary, callback, error);
     } catch (e) {
-        alert('getUserMedia threw exception :' + e);
+      alert('getUserMedia threw exception :' + e);
     }
 }
 
-function convertToMono( input ) {
-    var splitter = audioContext.createChannelSplitter(2);
-    var merger = audioContext.createChannelMerger(2);
+function convertToMono(input) {
+  var splitter = audioContext.createChannelSplitter(2);
+  var merger = audioContext.createChannelMerger(2);
 
-    input.connect( splitter );
-    splitter.connect( merger, 0, 0 );
-    splitter.connect( merger, 0, 1 );
-    return merger;
+  input.connect( splitter );
+  splitter.connect( merger, 0, 0 );
+  splitter.connect( merger, 0, 1 );
+  return merger;
 }
 
 function generateNoiseFloorCurve( floor ) {
-    // "floor" is 0...1
+  // "floor" is 0...1
 
-    var curve = new Float32Array(65536);
-    var mappedFloor = floor * 32768;
+  var curve = new Float32Array(65536);
+  var mappedFloor = floor * 32768;
 
-    for (var i=0; i<32768; i++) {
-        var value = (i<mappedFloor) ? 0 : 1;
+  for (var i=0; i<32768; i++) {
+    var value = (i<mappedFloor) ? 0 : 1;
 
-        curve[32768-i] = -value;
-        curve[32768+i] = value;
-    }
-    curve[0] = curve[1]; // fixing up the end.
+    curve[32768-i] = -value;
+    curve[32768+i] = value;
+  }
+  curve[0] = curve[1]; // fixing up the end.
 
-    return curve;
+  return curve;
 }
 
 function createNoiseGate( connectTo ) {
-    var inputNode = audioContext.createGain();
-    var rectifier = audioContext.createWaveShaper();
-    var ngFollower = audioContext.createBiquadFilter();
-    ngFollower.type = ngFollower.LOWPASS;
-    ngFollower.frequency.value = 10.0;
+  var inputNode = audioContext.createGain();
+  var rectifier = audioContext.createWaveShaper();
+  var ngFollower = audioContext.createBiquadFilter();
+  ngFollower.type = ngFollower.LOWPASS;
+  ngFollower.frequency.value = 10.0;
 
-    var curve = new Float32Array(65536);
-    for (var i=-32768; i<32768; i++)
-        curve[i+32768] = ((i>0)?i:-i)/32768;
-    rectifier.curve = curve;
-    rectifier.connect(ngFollower);
+  var curve = new Float32Array(65536);
+  for (var i=-32768; i<32768; i++)
+  curve[i+32768] = ((i>0)?i:-i)/32768;
+  rectifier.curve = curve;
+  rectifier.connect(ngFollower);
 
-    var ngGate = audioContext.createWaveShaper();
-    ngGate.curve = generateNoiseFloorCurve(0.01);
+  var ngGate = audioContext.createWaveShaper();
+  ngGate.curve = generateNoiseFloorCurve(0.01);
 
-    ngFollower.connect(ngGate);
+  ngFollower.connect(ngGate);
 
-    var gateGain = audioContext.createGain();
-    gateGain.gain.value = 0.0;
-    ngGate.connect( gateGain.gain );
+  var gateGain = audioContext.createGain();
+  gateGain.gain.value = 0.0;
+  ngGate.connect( gateGain.gain );
 
-    gateGain.connect( connectTo );
+  gateGain.connect( connectTo );
 
-    inputNode.connect(rectifier);
-    inputNode.connect(gateGain);
-    return inputNode;
+  inputNode.connect(rectifier);
+  inputNode.connect(gateGain);
+  return inputNode;
 }
 
 var lpInputFilter=null;
@@ -560,102 +574,26 @@ var lpInputFilter=null;
 // this is ONLY because we have massive feedback without filtering out
 // the top end in live speaker scenarios.
 function createLPInputFilter(output) {
-	lpInputFilter = audioContext.createBiquadFilter();
-	lpInputFilter.connect(output);
-	lpInputFilter.frequency.value = 2048;
-	return lpInputFilter;
+  lpInputFilter = audioContext.createBiquadFilter();
+  lpInputFilter.connect(output);
+  lpInputFilter.frequency.value = 2048;
+  return lpInputFilter;
 }
 
-var liveInput = false;
 
-function gotStream(stream) {
-    // Create an AudioNode from the stream.
-    var mediaStreamSource = audioContext.createMediaStreamSource(stream);    
-
-	modulatorGain = audioContext.createGain();
-	modulatorGain.gain.value = modulatorGainValue;
-	modulatorGain.connect( modulatorInput );
-
-	// make sure the source is mono - some sources will be left-side only
-    var monoSource = convertToMono( mediaStreamSource );
-
-    //create a noise gate
-    monoSource.connect( createLPInputFilter( createNoiseGate( modulatorGain ) ) );
-
-	createCarriersAndPlay( carrierInput );
-
-	vocoding = true;
-	liveInput = true;
-
- 	window.requestAnimationFrame( updateAnalysers );
-}
 
 function useLiveInput() {
-	if (vocoding) {
-		if (modulatorNode)
-			modulatorNode.stop(0);
-		shutOffCarrier();
-		vocoding = false;
-		cancelVocoderUpdates();
-		if (endOfModulatorTimer)
-			window.clearTimeout(endOfModulatorTimer);
-		endOfModulatorTimer = 0;
-	} else if (document.getElementById("carrierpreview").classList.contains("playing") )
-		finishPreviewingCarrier();
-	else if (document.getElementById("modulatorpreview").classList.contains("playing") )
-		finishPreviewingModulator();
+  if (vocoding) {
+    if (modulatorNode)
+      modulatorNode.stop(0);
+    shutOffCarrier();
+    vocoding = false;
+  } else if (document.getElementById("carrierpreview").classList.contains("playing") )
+    finishPreviewingCarrier();
+  else if (document.getElementById("modulatorpreview").classList.contains("playing") )
+    finishPreviewingModulator();
 
-    getUserMedia({audio:true}, gotStream);	
+  getUserMedia({audio:true}, gotStream);
 }
 
-window.addEventListener('keydown', function(ev) {
-		var centOffset;
-       switch (ev.keyCode) {
-       	case 'A'.charCodeAt(0):
-       		centOffset = -700;		break;
-        case 'W'.charCodeAt(0):
-        	centOffset = -600;		break;
-       	case 'S'.charCodeAt(0):
-       		centOffset = -500;		break;
-        case 'E'.charCodeAt(0):
-        	centOffset = -400;		break;
-        case 'D'.charCodeAt(0):
-        	centOffset = -300;		break;
-        case 'R'.charCodeAt(0):
-        	centOffset = -200;		break;
-        case 'F'.charCodeAt(0):
-        	centOffset = -100;		break;
-        case 'G'.charCodeAt(0):
-        	centOffset = 0;			break;
-        case 'Y'.charCodeAt(0):
-        	centOffset = 100;		break;
-        case 'H'.charCodeAt(0):
-        	centOffset = 200;		break;
-        case 'U'.charCodeAt(0):
-        	centOffset = 300;		break;
-        case 'J'.charCodeAt(0):
-        	centOffset = 400;		break;
-        case 'K'.charCodeAt(0):
-        	centOffset = 500;		break;
-        case 'O'.charCodeAt(0):
-        	centOffset = 600;		break;
-        case 'L'.charCodeAt(0):
-        	centOffset = 700;		break;
-        case 'P'.charCodeAt(0):
-        	centOffset = 800;		break;
-        case 186: 	// ;
-        	centOffset = 900;		break;
-        case 219: 	// [
-        	centOffset = 1000;		break;
-        case 222: 	// '
-        	centOffset = 1100;		break;
-        default:
-        	return;
-      }
-      var detunegroup = document.getElementById("detunegroup");
-      $( detunegroup.children[1] ).slider( "value", centOffset );
-      updateSlider( detunegroup, centOffset, " cents" );
-      if (oscillatorNode)
-        oscillatorNode.detune.value = centOffset;
-
-    }, false);
+  //oscillatorNode.detune.value = centOffset;
