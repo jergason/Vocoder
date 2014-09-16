@@ -463,8 +463,10 @@ function vocode() {
 }
 
 // Initialization function for the page.
-function init(ctx, oscillatorNode, carrierNode) {
+function init(ctx, carrierB, modulatorB) {
   audioContext = ctx;
+  carrierBuffer = carrierB;
+  modulatorBuffer = modulatorB;
   generateVocoderBands(55, 7040, 28);
   // Set up the vocoder chains
   setupVocoderGraph();
