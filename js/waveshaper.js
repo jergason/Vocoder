@@ -30,8 +30,7 @@
 var threshold = -27; // dB
 var headroom = 21; // dB
 
-function e4(x, k)
-{
+function e4(x, k) {
     return 1.0 - Math.exp(-k * x);
 }
 
