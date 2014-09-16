@@ -99,14 +99,14 @@ function vocoder(ctx, cb, mb) {
   }
 
   function selectSawtooth() {
-    if ( wavetableSignalGain )
+    if (wavetableSignalGain)
       wavetableSignalGain.gain.value = SAWTOOTHBOOST;
     if (oscillatorNode)
       oscillatorNode.type = "sawtooth";
   }
 
   function selectWavetable() {
-    if ( wavetableSignalGain )
+    if (wavetableSignalGain)
       wavetableSignalGain.gain.value = WAVETABLEBOOST;
     if (oscillatorNode)
       oscillatorNode.setPeriodicWave ?
@@ -141,14 +141,6 @@ function vocoder(ctx, cb, mb) {
     if (noiseGain)
       noiseGain.gain.value = ui.value;
   }
-
-  // detuning for wavetable and sawtooth oscillators
-  function onUpdateDetuneLevel(event, ui) {
-    oscillatorDetuneValue = ui.value;
-    if (oscillatorNode)
-      oscillatorNode.detune.value = ui.value;
-  }
-
 
   // this function will algorithmically re-calculate vocoder bands, distributing evenly
   // from startFreq to endFreq, splitting evenly (logarhythmically) into a given numBands.
@@ -462,6 +454,14 @@ function vocoder(ctx, cb, mb) {
 
   // kick out the jams
   init(ctx, cb, mb);
+
+  return {
+    modulatorNode: modulatorNode,
+    modulatorGain: modulatorGain,
+    synthLevel: oscillatorGain,
+    noiseNode: noiseGain,
+    oscillatorNode: oscillatorNode
+  };
 }
 
 module.exports = vocoder;
