@@ -1,9 +1,31 @@
-# Web Audio Vocoder
+# Vocoder
 
-This application (also shown at I/O 2012) implements a 28-band (actually variable number of bands) vocoder - a "robotic voice" processor. It's a pretty complex audio processing demo.  It also supports live input, and has several controls exposed; it supports MIDI control over the pitch and other parameters.
+This is a port of Chris Wilson's [Vocoder](https://github.com/cwilso/Vocoder)
+project with all the UI stripped out and modified to work with Browserify.
 
-Check it out, feel free to submit issues or requests, fork, submit pull requests, etc.
+Basically, you can control the pitch of a vocal track. `(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧ M A G I C AL (ಥ﹏ಥ)`
 
-The live app is at http://webaudiodemos.appspot.com/Vocoder/index.html.
 
--Chris
+## Installation
+
+```bash
+npm install --save vocoder
+```
+
+## Usage
+
+###`function vocoder(audioContext, carrierBuffer, modulatorBuffer)`
+
+Start the vocoder playing the `modulatorBuffer` mixed in with the `carrierBuffer`.
+These are both AudioBuffers.
+
+## Example
+```javascript
+var vocoder = require('vocoder');
+var load = require('webaudio-buffer-loader');
+
+var ctx = new AudioContext();
+
+load(['/carrier.ogg', '/modulator.ogg'], ctx, function(err, buffers) {
+});
+```
