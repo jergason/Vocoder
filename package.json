@@ -1,10 +1,10 @@
 {
-  "name": "Vocoder",
-  "version": "1.0.0",
+  "name": "vocoder",
+  "version": "0.1.0",
   "description": "A vocoder for the web audio api",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"EVERYTHING IS FINE\""
   },
   "repository": {
     "type": "git",
